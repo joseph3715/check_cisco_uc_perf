@@ -1,8 +1,12 @@
+//usr/bin/env go run "$0" "$@"; exit "$?"
+
 // 	file: check_cisco_uc_perf.go
-// 	Version 0.3.3 (30.11.2015)
+// 	Version 0.4.0 (01.10.2019)
 //
 // check_cisco_uc_perf is a Nagios plugin made by Herwig Grimm (herwig.grimm at aon.at)
 // to monitor the performance Cisco Unified Communications Servers.
+//
+// updated by Jeremy Worden (jeremy.worden at gmail.com)
 //
 // I have used the Google Go programming language because of no need to install
 // any libraries.
@@ -14,18 +18,21 @@
 // General Public Licence (see http://www.fsf.org/licensing/licenses/gpl.txt).
 //
 // log files and cache file:
-//  		befor first use create the following log files and cache file
+//  		before first use create the following log files and cache file
 //  		touch /var/log/check_cisco_uc_perf.log
 //  		chown nagios.nagios /var/log/check_cisco_uc_perf.log
+// 			for use with librenms use: chown librenms.librenms /var/log/check_cisco_uc_perf.log
 //
 //  		mkdir /tmp/check_cisco_uc_perf_cache
 //  		chown nagios.nagios  /tmp/check_cisco_uc_perf_cache
+// 			for use with librenms use: chown librenms.librenms /tmp/check_cisco_uc_perf_cache
 //
 //
 // tested with:
 // 			Cisco Unified Communications Manager CUCM version 8.6.2.22900-9
 //			Cisco Unified Communications Manager CUCM version 9.1.2.11900-12
 //			Cisco Unified Communications Manager CUCM version 11.0.1.20000-2
+//          Cisco Unified Communications Manager CUCM version 12.0.1.23900-9
 //
 // see also:
 // 		Cisco Unified Communications Manager XML Developers Guide, Release 9.0(1)
@@ -38,6 +45,11 @@
 //		Version 0.3.1 (27.02.2015) new flag -m maximum cache age in seconds and flag -a and flag -A Cisco AXL API version of AXL XML Namespace
 //		Version 0.3.2 (27.02.2015) changed flag -H usage description
 //		Version 0.3.3 (30.11.2015) CUCM version 11.0: in TLSClientConfig MaxVersion set to tls.VersionTLS11 (TLS 1.1)
+//		Version 0.4.0 (01.10.2019) CUCM version 12.0
+//
+//
+// example
+//		go run check_cisco_uc_perf.go  -H 10.10.10.1 -N '10.10.10.1 10.10.10.2 10.10.10.3' -u administrator -p changeMe! -o 'Cisco SIP' -A '12.0'
 
 package main
 
@@ -62,66 +74,69 @@ import (
 
 const (
 	outputPrefix = "UC Perfmon"
-	version      = "0.3.2"
+	version      = "0.4.0"
 	tmpSubdir    = "/check_cisco_uc_perf_cache/check_cisco_uc_perf_"
 )
 
 type (
+	// PerfmonListCounter ...
 	PerfmonListCounter struct {
 		XMLName struct{} `xml:"soap:perfmonListCounter"`
 		Host    string   `xml:"soap:Host"`
 	}
 
+	// PerfmonCollectCounterData ...
 	PerfmonCollectCounterData struct {
 		XMLName struct{} `xml:"soap:perfmonCollectCounterData"`
 		Host    string   `xml:"soap:Host"`
 		Object  string   `xml:"soap:Object"`
 	}
 
+	// Item ...
 	Item struct {
 		XMLName xml.Name `xml:"item"`
 		Name    string
 		Value   string
 		CStatus string
 	}
-
+	// PerfmonCollectCounterDataResponse ...
 	PerfmonCollectCounterDataResponse struct {
 		XMLName xml.Name `xml:"perfmonCollectCounterDataResponse"`
 		Item    []Item   `xml:"ArrayOfCounterInfo>item"`
 	}
-
+	// SoapBody ...
 	SoapBody struct {
 		XMLName                   xml.Name `xml:"Body"`
 		PerfmonCollectCounterData *PerfmonCollectCounterDataResponse
 	}
-
+	// Envelope ...
 	Envelope struct {
 		XMLName xml.Name `xml:"Envelope"`
 		Soap    *SoapBody
 	}
-
+	// ListCounterItem ...
 	ListCounterItem struct {
 		XMLName xml.Name `xml:"item"`
 		Name    string
 	}
-
+	// ListCounterObjectItem ...
 	ListCounterObjectItem struct {
 		XMLName       xml.Name `xml:"item"`
 		Name          string
 		MultiInstance string
 		Item          []ListCounterItem `xml:"ArrayOfCounter>item"`
 	}
-
+	// PerfmonListCounterResponse ...
 	PerfmonListCounterResponse struct {
 		XMLName xml.Name                `xml:"perfmonListCounterResponse"`
 		Item    []ListCounterObjectItem `xml:"ArrayOfObjectInfo>item"`
 	}
-
+	// ListCounterSoapBody ....
 	ListCounterSoapBody struct {
 		XMLName                xml.Name `xml:"Body"`
 		PerfmonListCounterData *PerfmonListCounterResponse
 	}
-
+	// ListCounterEnvelope ...
 	ListCounterEnvelope struct {
 		XMLName xml.Name `xml:"Envelope"`
 		Soap    *ListCounterSoapBody
@@ -130,7 +145,7 @@ type (
 
 var (
 	ipAddr            string
-	nodeIpAddr        string
+	nodeIPAddr        string
 	username          string
 	password          string
 	objectInstance    string
@@ -138,10 +153,12 @@ var (
 	debug             int
 	warningThreshold  string
 	criticalThreshold string
+	thresholdMinFlag  string
 	showVersion       bool
 	showCounters      bool
 	maxCacheAge       int64
 	apiVersion        string
+	combinedValue     float64
 )
 
 func debugPrintf(level int, format string, a ...interface{}) {
@@ -159,15 +176,15 @@ func isFullQualified(counterName string) bool {
 	}
 	if r.MatchString(counterName) {
 		return true
-	} else {
-		return false
 	}
+
+	return false
 }
 
 // save struct to json file in tmp dir
 func saveStruct(ipAddr, object string, o *Envelope) bool {
 
-	itemJson, err := json.Marshal(o)
+	itemJSON, err := json.Marshal(o)
 	if err != nil {
 		debugPrintf(1, "error: %s", err)
 		return false
@@ -175,7 +192,7 @@ func saveStruct(ipAddr, object string, o *Envelope) bool {
 
 	filename := fmt.Sprintf("%s%s%d_%s_%s", os.TempDir(), tmpSubdir, os.Getuid(), ipAddr, object)
 
-	err = ioutil.WriteFile(filename, itemJson, 0666)
+	err = ioutil.WriteFile(filename, itemJSON, 0666)
 
 	if err != nil {
 		debugPrintf(1, "error: %s", err)
@@ -218,12 +235,12 @@ func loadStruct(ipAddr, object string, ageInSeconds int64, o *Envelope) bool {
 // according to "Nagios Plugin Development Guidelines"
 // section "Plugin Return Codes, Threshold and ranges"
 // see https://nagios-plugins.org/doc/guidelines.html
-func getNagiosReturnVal(value float64, warningThresholdRange, criticalThresholdRange string) int {
+func getNagiosReturnVal(value float64, warningThresholdRange, criticalThresholdRange string, thresholdMinFlag string) int {
 	r := 0
-	if generateAlert(value, warningThresholdRange) {
+	if generateAlert(value, warningThresholdRange, thresholdMinFlag) {
 		r = 1 // warning
 	}
-	if generateAlert(value, criticalThresholdRange) {
+	if generateAlert(value, criticalThresholdRange, thresholdMinFlag) {
 		r = 2 // critical
 	}
 	return r
@@ -233,27 +250,52 @@ func getNagiosReturnVal(value float64, warningThresholdRange, criticalThresholdR
 // according to "Nagios Plugin Development Guidelines"
 // section "Plugin Return Codes, Threshold and ranges"
 // see https://nagios-plugins.org/doc/guidelines.html
-func generateAlert(value float64, thresholdRange string) bool {
+func generateAlert(value float64, thresholdRange string, thresholdMinFlag string) bool {
 	r := strings.Split(thresholdRange, ":")
 	matched, _ := regexp.MatchString(`^[0-9.]+:[0-9.]+`, thresholdRange)
 	switch {
 	case len(r) == 1:
-		float64_threshold, _ := strconv.ParseFloat(thresholdRange, 64)
-		return value < 0 || value > float64_threshold
+		float64Threshold, _ := strconv.ParseFloat(thresholdRange, 64)
+		if thresholdMinFlag == "max" {
+			return value < 0 || value > float64Threshold
+		}
+		if thresholdMinFlag == "min" {
+			return value < 0 || value < float64Threshold
+		}
 	case strings.HasSuffix(thresholdRange, ":"):
-		float64_threshold, _ := strconv.ParseFloat(r[0], 64)
-		return value < float64_threshold
+		float64Threshold, _ := strconv.ParseFloat(r[0], 64)
+		if thresholdMinFlag == "max" {
+			return value < float64Threshold
+		}
+		if thresholdMinFlag == "min" {
+			return value > float64Threshold
+		}
 	case strings.HasPrefix(thresholdRange, "~"):
-		float64_threshold, _ := strconv.ParseFloat(r[1], 64)
-		return value > float64_threshold
+		float64Threshold, _ := strconv.ParseFloat(r[1], 64)
+		if thresholdMinFlag == "max" {
+			return value > float64Threshold
+		}
+		if thresholdMinFlag == "min" {
+			return value < float64Threshold
+		}
 	case matched:
-		float64_threshold1, _ := strconv.ParseFloat(r[0], 64)
-		float64_threshold2, _ := strconv.ParseFloat(r[1], 64)
-		return value < float64_threshold1 || value > float64_threshold2
+		float64Threshold1, _ := strconv.ParseFloat(r[0], 64)
+		float64Threshold2, _ := strconv.ParseFloat(r[1], 64)
+		if thresholdMinFlag == "max" {
+			return value < float64Threshold1 || value > float64Threshold2
+		}
+		if thresholdMinFlag == "min" {
+			return value > float64Threshold1 || value < float64Threshold2
+		}
 	case strings.HasPrefix(thresholdRange, "@"):
-		float64_threshold1, _ := strconv.ParseFloat(strings.TrimPrefix(r[0], "@"), 64)
-		float64_threshold2, _ := strconv.ParseFloat(r[1], 64)
-		return value >= float64_threshold1 && value <= float64_threshold2
+		float64Threshold1, _ := strconv.ParseFloat(strings.TrimPrefix(r[0], "@"), 64)
+		float64Threshold2, _ := strconv.ParseFloat(r[1], 64)
+		if thresholdMinFlag == "max" {
+			return value >= float64Threshold1 && value <= float64Threshold2
+		}
+		if thresholdMinFlag == "min" {
+			return value <= float64Threshold1 && value >= float64Threshold2
+		}
 	}
 	return true
 }
@@ -277,18 +319,19 @@ func returnValText(returnVal int) string {
 
 func init() {
 	flag.StringVar(&ipAddr, "H", "", "AXL server IP address")
-	flag.StringVar(&nodeIpAddr, "N", "", "Node IP address")
+	flag.StringVar(&nodeIPAddr, "N", "", "Node IP address")
 	flag.StringVar(&username, "u", "", "username")
 	flag.StringVar(&password, "p", "", "password")
-	flag.StringVar(&objectInstance, "o", "Memory", "Perfmon object with optional tailing instance names in parenthesis")
+	flag.StringVar(&objectInstance, "o", "Cisco SIP", "Perfmon object with optional tailing instance names in parenthesis")
 	flag.StringVar(&counterName, "n", "", "Counter name")
-	flag.IntVar(&debug, "d", 0, "print debug, level: 1 errors only, 2 warnings and 3 informational messages")
-	flag.StringVar(&warningThreshold, "w", "1", "Warning threshold or threshold range")
-	flag.StringVar(&criticalThreshold, "c", "1", "Critical threshold or threshold range")
+	flag.IntVar(&debug, "d", 3, "print debug, level: 1 errors only, 2 warnings and 3 informational messages")
+	flag.StringVar(&warningThreshold, "w", "0", "Warning threshold or threshold range")
+	flag.StringVar(&criticalThreshold, "c", "0", "Critical threshold or threshold range")
+	flag.StringVar(&thresholdMinFlag, "f", "max", "use thresold as min value rather than max")
 	flag.BoolVar(&showVersion, "V", false, "print plugin version")
 	flag.BoolVar(&showCounters, "l", false, "print PerfmonListCounter")
 	flag.Int64Var(&maxCacheAge, "m", 180, "maximum cache age in seconds")
-	flag.StringVar(&apiVersion, "A", "9.0", "Cisco AXL API version of AXL XML Namespace")
+	flag.StringVar(&apiVersion, "A", "12.0", "Cisco AXL API version of AXL XML Namespace")
 }
 
 func main() {
@@ -323,164 +366,166 @@ func main() {
 		object = objectInstance
 	}
 
-	debugPrintf(3, "CUCM IP address: %s Node IP address: %s\n", ipAddr, nodeIpAddr)
+	debugPrintf(3, "CUCM IP address: %s Node IP address: %s\n", ipAddr, nodeIPAddr)
 	debugPrintf(3, "Perfmon object: %s Counter name: %s\n", object, counterName)
 	debugPrintf(3, "Counter instance name: %s max cache age: %d\n", objectInstance, maxCacheAge)
 
-	envelope := new(Envelope)
-	loaded := loadStruct(nodeIpAddr, object, maxCacheAge, envelope)
-	if !loaded {
-		debugPrintf(3, "No persistence file found or persistence file too old\n")
-		usePersistData = false
-	} else {
-		debugPrintf(3, "Persistence file found: %+v\n", envelope)
-		if isFullQualified(counterName) {
-			fullCounterName = counterName
+	nodeIPAddrArr := strings.Split(nodeIPAddr, " ")
+	debugPrintf(3, "Node array: %s", nodeIPAddrArr)
+
+	for _, s := range nodeIPAddrArr {
+		envelope := new(Envelope)
+		loaded := loadStruct(s, object, maxCacheAge, envelope)
+		if !loaded {
+			debugPrintf(3, "No persistence file found or persistence file too old\n")
+			usePersistData = false
 		} else {
-			fullCounterName = fmt.Sprintf("\\\\%s\\%s\\%s", nodeIpAddr, object, counterName)
-		}
-		for _, v := range envelope.Soap.PerfmonCollectCounterData.Item {
-			if v.Name == fullCounterName {
-				debugPrintf(3, "Name: %s Value: %s\n", v.Name, v.Value)
+			debugPrintf(3, "Persistence file found: %+v\n", envelope)
+			if isFullQualified(counterName) {
+				fullCounterName = counterName
+			} else {
+				fullCounterName = fmt.Sprintf("\\\\%s\\%s\\%s", s, object, counterName)
 			}
+			for _, v := range envelope.Soap.PerfmonCollectCounterData.Item {
+				if v.Name == fullCounterName {
+					debugPrintf(3, "Name: %s Value: %s\n", v.Name, v.Value)
+				}
+			}
+			usePersistData = true
 		}
-		usePersistData = true
-	}
 
-	debugPrintf(3, "use persistence: %v\n", usePersistData)
+		debugPrintf(3, "use persistence: %v\n", usePersistData)
 
-	if !usePersistData || showCounters {
+		if !usePersistData || showCounters {
 
-		client := &http.Client{
+			client := &http.Client{
 
-			Transport: &http.Transport{
-				Proxy: http.ProxyFromEnvironment,
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-					MaxVersion:         tls.VersionTLS11,
+				Transport: &http.Transport{
+					Proxy: http.ProxyFromEnvironment,
+					TLSClientConfig: &tls.Config{
+						InsecureSkipVerify: true,
+						MaxVersion:         tls.VersionTLS11,
+					},
 				},
-			},
-		}
+			}
 
-		xml_header := []byte(`<?xml version="1.0" encoding="utf-8" ?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:soap="http://schemas.cisco.com/ast/soap"><soapenv:Header/><soapenv:Body>`)
-		xml_footer := []byte(`</soapenv:Body></soapenv:Envelope>`)
+			xmlHeader := []byte(`<?xml version="1.0" encoding="utf-8" ?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:soap="http://schemas.cisco.com/ast/soap"><soapenv:Header/><soapenv:Body>`)
+			xmlFooter := []byte(`</soapenv:Body></soapenv:Envelope>`)
 
-		xml_data := make([]byte, 32768)
+			xmlData := make([]byte, 32768)
 
-		if showCounters {
-			req_data := &PerfmonListCounter{Host: nodeIpAddr}
-			xml_data, _ = xml.Marshal(req_data)
-		} else {
-			req_data := &PerfmonCollectCounterData{Host: nodeIpAddr, Object: object}
-			xml_data, _ = xml.Marshal(req_data)
-		}
+			if showCounters {
+				reqData := &PerfmonListCounter{Host: s}
+				xmlData, _ = xml.Marshal(reqData)
+			} else {
+				reqData := &PerfmonCollectCounterData{Host: s, Object: object}
+				xmlData, _ = xml.Marshal(reqData)
+			}
 
-		buf_all := make([]byte, 32768)
+			bufAll := make([]byte, 32768)
 
-		buf_all = append(buf_all, xml_header...)
-		buf_all = append(buf_all, xml_data...)
-		buf_all = append(buf_all, xml_footer...)
+			bufAll = append(bufAll, xmlHeader...)
+			bufAll = append(bufAll, xmlData...)
+			bufAll = append(bufAll, xmlFooter...)
 
-		xml_all := fmt.Sprintf("%s%s%s", xml_header, xml_data, xml_footer)
+			xmlAll := fmt.Sprintf("%s%s%s", xmlHeader, xmlData, xmlFooter)
 
-		debugPrintf(4, "XMP SOAP request: %s\n", xml_all)
+			debugPrintf(4, "XMP SOAP request: %s\n", xmlAll)
 
-		data := bytes.NewBufferString(xml_all)
+			data := bytes.NewBufferString(xmlAll)
 
-		url := "https://" + ipAddr + ":8443/perfmonservice/services/PerfmonPort"
-		debugPrintf(3, "URL: %s\n", url)
-		req, err := http.NewRequest("POST", url, data)
-		req.Header.Add("Content-type", "text/xml")
-		req.Header.Add("SOAPAction", "CUCM:DB ver="+apiVersion)
-		req.SetBasicAuth(username, password)
+			url := "https://" + ipAddr + ":8443/perfmonservice/services/PerfmonPort"
+			debugPrintf(3, "URL: %s\n", url)
+			req, err := http.NewRequest("POST", url, data)
+			req.Header.Add("Content-type", "text/xml")
+			req.Header.Add("SOAPAction", "CUCM:DB ver="+apiVersion)
+			req.SetBasicAuth(username, password)
 
-		debugPrintf(4, "username: %s, password: %s\n", username, password)
+			debugPrintf(4, "username: %s, password: %s\n", username, password)
 
-		resp, err := client.Do(req)
-		if err != nil {
-			debugPrintf(1, "HTTPS request error: %s %#v\n", err, resp)
-			os.Exit(3)
-		}
-		defer resp.Body.Close()
-		body, _ := ioutil.ReadAll(resp.Body)
-
-		debugPrintf(4, "XMP SOAP response: %s\n", body)
-
-		if showCounters {
-			envelope := new(ListCounterEnvelope)
-			err = xml.Unmarshal([]byte(body), envelope)
+			resp, err := client.Do(req)
 			if err != nil {
-				debugPrintf(1, "ListCounterEnvelope XML unmarshal error: %s\n", err)
+				debugPrintf(1, "HTTPS request error: %s %#v\n", err, resp)
 				os.Exit(3)
 			}
+			defer resp.Body.Close()
+			body, _ := ioutil.ReadAll(resp.Body)
 
-			fmt.Printf("%d items\n", len(envelope.Soap.PerfmonListCounterData.Item))
+			debugPrintf(4, "XMP SOAP response: %s\n", body)
 
-			for _, v := range envelope.Soap.PerfmonListCounterData.Item {
-				fmt.Printf("%v\n", v.Name)
-				for _, c := range v.Item {
-					fmt.Printf("\t%s\n", c.Name)
-				}
-			}
-			os.Exit(0)
-		}
-
-		// envelope := new(Envelope)
-		err = xml.Unmarshal([]byte(body), envelope)
-		if err != nil {
-			debugPrintf(1, "XML unmarshal error: %s\n", err)
-			os.Exit(3)
-		}
-		saveStruct(nodeIpAddr, object, envelope)
-	}
-
-	if len(counterName) > 0 {
-		if isFullQualified(counterName) {
-			fullCounterName = counterName
-		} else {
-			fullCounterName = fmt.Sprintf("\\\\%s\\%s\\%s", nodeIpAddr, objectInstance, counterName)
-		}
-		debugPrintf(3, "fullCounterName: >>%s<<\n", fullCounterName)
-		for _, v := range envelope.Soap.PerfmonCollectCounterData.Item {
-			if v.Name == fullCounterName {
-
-				value, err := strconv.ParseFloat(v.Value, 64)
+			if showCounters {
+				envelope := new(ListCounterEnvelope)
+				err = xml.Unmarshal([]byte(body), envelope)
 				if err != nil {
-					debugPrintf(1, "Counter value string to float64 convert error: %s\n", err)
+					debugPrintf(1, "ListCounterEnvelope XML unmarshal error: %s\n", err)
 					os.Exit(3)
 				}
-				returnVal = getNagiosReturnVal(value, warningThreshold, criticalThreshold)
-				debugPrintf(3, "returnVal: %d\n", returnVal)
-				statusStr := returnValText(returnVal)
 
-				nagiosOutput := fmt.Sprintf("%s - %s,%s,%s=%s|%s=%s;%s;%s;;", statusStr, outputPrefix, objectInstance, counterName, v.Value, counterName, v.Value, warningThreshold, criticalThreshold)
-				nagiosOutput = html.EscapeString(nagiosOutput)
-				nagiosOutput = strings.Replace(nagiosOutput, "%", "Percent", -1)
-				nagiosOutput = strings.Replace(nagiosOutput, "\\", "\\\\", -1)
-				fmt.Printf("%s\n", nagiosOutput)
-				os.Exit(returnVal)
+				fmt.Printf("%d items\n", len(envelope.Soap.PerfmonListCounterData.Item))
+
+				for _, v := range envelope.Soap.PerfmonListCounterData.Item {
+					fmt.Printf("%v\n", v.Name)
+					for _, c := range v.Item {
+						fmt.Printf("\t%s\n", c.Name)
+					}
+				}
+				os.Exit(0)
 			}
-		}
-		returnVal := 3
-		statusStr := returnValText(returnVal)
-		fmt.Printf("%s - Counter not found: %s\n", statusStr, fullCounterName)
-		os.Exit(returnVal)
 
-	} else {
-		// find longest Name
-		max_len := 0
-		for _, v := range envelope.Soap.PerfmonCollectCounterData.Item {
-			if l := len(v.Name); l > max_len {
-				max_len = l
+			// envelope := new(Envelope)
+			err = xml.Unmarshal([]byte(body), envelope)
+			if err != nil {
+				debugPrintf(1, "XML unmarshal error: %s\n", err)
+				os.Exit(3)
 			}
+			saveStruct(s, object, envelope)
 		}
 
-		for _, v := range envelope.Soap.PerfmonCollectCounterData.Item {
-			space := strings.Repeat(" ", max_len+3-len(v.Name))
-			fmt.Printf("Name: %s%sValue: %s\n", v.Name, space, v.Value)
+		if len(counterName) > 0 {
+			if isFullQualified(counterName) {
+				fullCounterName = counterName
+			} else {
+				fullCounterName = fmt.Sprintf("\\\\%s\\%s\\%s", s, objectInstance, counterName)
+			}
+			debugPrintf(3, "fullCounterName: >>%s<<\n", fullCounterName)
+			for _, v := range envelope.Soap.PerfmonCollectCounterData.Item {
+				if v.Name == fullCounterName {
+					// fmt.Printf("%s\n", v.Value)
+					value, err := strconv.ParseFloat(v.Value, 64)
+					if err != nil {
+						debugPrintf(1, "Counter value string to float64 convert error: %s\n", err)
+					} else {
+						combinedValue += value
+					}
+				}
+			}
+		} else {
+			// find longest Name
+			maxLen := 0
+			for _, v := range envelope.Soap.PerfmonCollectCounterData.Item {
+				if l := len(v.Name); l > maxLen {
+					maxLen = l
+				}
+			}
+
+			for _, v := range envelope.Soap.PerfmonCollectCounterData.Item {
+				space := strings.Repeat(" ", maxLen+3-len(v.Name))
+				fmt.Printf("Name: %s%sValue: %s\n", v.Name, space, v.Value)
+
+			}
 
 		}
-
 	}
+
+	returnVal = getNagiosReturnVal(combinedValue, warningThreshold, criticalThreshold, thresholdMinFlag)
+	debugPrintf(3, "returnVal: %d\n", returnVal)
+	statusStr := returnValText(returnVal)
+
+	nagiosOutput := fmt.Sprintf("%s - %s,%s,%s=%s|%s=%s;%s;%s;;", statusStr, outputPrefix, objectInstance, counterName, fmt.Sprintf("%.0f", combinedValue), counterName, fmt.Sprintf("%.0f", combinedValue), warningThreshold, criticalThreshold)
+	nagiosOutput = html.EscapeString(nagiosOutput)
+	nagiosOutput = strings.Replace(nagiosOutput, "%", "Percent", -1)
+	nagiosOutput = strings.Replace(nagiosOutput, "\\", "\\\\", -1)
+	fmt.Printf("%s\n", nagiosOutput)
+	os.Exit(returnVal)
 
 }
