@@ -3,7 +3,7 @@ check_cisco_uc_perf is a Nagios plugin to monitor the performance of Cisco Unifi
 
 
 file: check_cisco_ucm_perf.go
-Version 0.3.2 (27.02.2015)
+Version 0.4.0 (01.10.2019)
 
 check_cisco_ucm_perf is a Nagios plugin made by Herwig Grimm (herwig.grimm at aon.at)
 to monitor the performance Cisco Unified Communications Manager CUCM.
@@ -21,6 +21,7 @@ General Public Licence (see http://www.fsf.org/licensing/licenses/gpl.txt).
 		Cisco Unified Communications Manager CUCM version 10.5.1.11901-1
  		Cisco Unified Communications Manager CUCM version 9.1.2.11900-12
  		Cisco Unified Communications Manager CUCM version 8.6.2.22900-9
+		Cisco Unified Communications Manager CUCM version 12.0.1.23900-9
 
 # see also:
  		Cisco Unified Communications Manager XML Developers Guide, Release 9.0(1)
@@ -32,7 +33,8 @@ General Public Licence (see http://www.fsf.org/licensing/licenses/gpl.txt).
 		Version 0.3 (27.02.2015) General Public Licence added
 		Version 0.3.1 (27.02.2015) new flag -m maximum cache age in seconds and flag -a and flag -A Cisco AXL API version of AXL XML Namespace
 		Version 0.3.2 (27.02.2015) changed flag -H usage description
-
+		Version 0.4.0 (01.10.2019) CUCM version 12.0. Added -f flag for comparing thresholds as min or max values, added support for multiple node ip addresses and combining values. Added '//usr/bin/env go run "$0" "$@"; exit "$?"' to file to allow linux machines to run as ./check_cisco_uc_perf. See https://gist.github.com/posener/73ffd326d88483df6b1cb66e8ed1e0bd for example.
+		
 # Usage
   -A="apiVersion": Cisco AXL API version of AXL XML Namespace
   
@@ -59,3 +61,9 @@ General Public Licence (see http://www.fsf.org/licensing/licenses/gpl.txt).
   -u="": username
   
   -w="1": Warning threshold or threshold range
+  
+  -f="max": Either max (default) or min. Min will use thresholds as a min value rather than a max value.
+  
+# example
+	go run check_cisco_uc_perf.go  -H 10.10.10.1 -N '10.10.10.1 10.10.10.2 10.10.10.3' -u administrator -p changeMe! -o 'Cisco SIP' -A '12.0' -f min
+
