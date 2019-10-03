@@ -6,7 +6,7 @@
 // check_cisco_uc_perf is a Nagios plugin made by Herwig Grimm (herwig.grimm at aon.at)
 // to monitor the performance Cisco Unified Communications Servers.
 //
-// updated by Jeremy Worden (jeremy.worden at gmail.com)
+// updated by Jeremy Worden (jeremy.worden at automate.builders)
 //
 // I have used the Google Go programming language because of no need to install
 // any libraries.
