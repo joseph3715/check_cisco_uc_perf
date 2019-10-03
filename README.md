@@ -17,6 +17,8 @@ This nagios plugin is free software, and comes with ABSOLUTELY NO WARRANTY.
 It may be used, redistributed and/or modified under the terms of the GNU
 General Public Licence (see http://www.fsf.org/licensing/licenses/gpl.txt).
 
+Updates provided by Jeremy Worden (jeremy.worden at automate.builders)
+
 # tested with: 	
 		Cisco Unified Communications Manager CUCM version 10.5.1.11901-1
  		Cisco Unified Communications Manager CUCM version 9.1.2.11900-12
